@@ -53,29 +53,88 @@ class MockEngine: InferenceEngine, @unchecked Sendable {
         with input: [TokenId],
         samplingConfiguration: SamplingConfiguration,
         inferenceOptions: InferenceOptions
-    ) throws -> InferenceStream {
-        let (stream, continuation) = InferenceStream.makeStream()
-        Task {
-            do {
-                let forced = inferenceOptions.forcedContinuation
-                let maxTokens =
-                    forced?.count
-                    ?? min(
+    ) throws -> GenerationSequence {
+        GenerationSequence(
+            engine: self,
+            input: input,
+            inferenceOptions: inferenceOptions
+        )
+    }
+
+    struct GenerationSequence: InferenceOutputSequence {
+        typealias Element = InferenceOutput
+        typealias Failure = Error
+
+        let engine: MockEngine
+        let input: [TokenId]
+        let inferenceOptions: InferenceOptions
+
+        let stopReasonStore = StopReasonStore()
+
+        var stopReason: StopReason? { stopReasonStore.stopReason }
+
+        func setStopReason(_ reason: StopReason) {
+            stopReasonStore.set(reason)
+        }
+
+        func makeAsyncIterator() -> Iterator {
+            Iterator(
+                engine: engine,
+                input: input,
+                inferenceOptions: inferenceOptions,
+                stopReasonStore: stopReasonStore
+            )
+        }
+
+        struct Iterator: AsyncIteratorProtocol {
+            typealias Element = InferenceOutput
+            typealias Failure = Error
+
+            let engine: MockEngine
+            let returnsLogits: Bool
+            let forcedContinuation: [TokenId]?
+            let maxTokens: Int
+            let stopReasonStore: StopReasonStore
+
+            var step: Int = 0
+
+            init(
+                engine: MockEngine,
+                input: [TokenId],
+                inferenceOptions: InferenceOptions,
+                stopReasonStore: StopReasonStore
+            ) {
+                self.engine = engine
+                self.returnsLogits = inferenceOptions.includeLogits
+                self.forcedContinuation = inferenceOptions.forcedContinuation
+                self.stopReasonStore = stopReasonStore
+                if let forced = inferenceOptions.forcedContinuation {
+                    self.maxTokens = forced.count
+                } else {
+                    self.maxTokens = Swift.min(
                         inferenceOptions.maxTokens ?? Int.max,
-                        max(0, self.config.maxContextLength - input.count)
+                        Swift.max(0, engine.config.maxContextLength - input.count)
                     )
-                let returnsLogits = inferenceOptions.includeLogits
+                }
+            }
 
-                for i in 0..<maxTokens {
+            mutating func next() async throws -> InferenceOutput? {
+                guard step < maxTokens else {
+                    stopReasonStore.setIfUnset(.maxTokens)
+                    return nil
+                }
+
+                do {
                     try Task.checkCancellation()
-                    let idx = self.inferenceCallCount % self.tokenSequence.count
-                    let sequenceToken = self.tokenSequence[idx]
-                    self.inferenceCallCount += 1
 
-                    let nextToken = forced?[i] ?? sequenceToken
+                    let idx = engine.inferenceCallCount % engine.tokenSequence.count
+                    let sequenceToken = engine.tokenSequence[idx]
+                    engine.inferenceCallCount += 1
+
+                    let nextToken = forcedContinuation?[step] ?? sequenceToken
 
                     let logits: [Float16]?
-                    if returnsLogits, let vocabSize = self.vocabSize {
+                    if returnsLogits, let vocabSize = engine.vocabSize {
                         var dist = [Float16](repeating: Float16(-10.0), count: vocabSize)
                         let tokenIdx = Int(nextToken)
                         if tokenIdx >= 0 && tokenIdx < vocabSize {
@@ -86,19 +145,17 @@ class MockEngine: InferenceEngine, @unchecked Sendable {
                         logits = nil
                     }
 
-                    continuation.yield(InferenceOutput(tokenId: nextToken, logits: logits))
+                    step += 1
+                    return InferenceOutput(tokenId: nextToken, logits: logits)
+                } catch is CancellationError {
+                    stopReasonStore.set(.cancelled)
+                    throw CancellationError()
+                } catch {
+                    stopReasonStore.set(.error)
+                    throw error
                 }
-                stream.setStopReason(.maxTokens)
-                continuation.finish()
-            } catch is CancellationError {
-                stream.setStopReason(.cancelled)
-                continuation.finish()
-            } catch {
-                stream.setStopReason(.error)
-                continuation.finish(throwing: error)
             }
         }
-        return stream
     }
 
     func reset() async throws {

@@ -429,13 +429,15 @@ public struct CoreAILanguageModel: LanguageModel {
                 toolCallParser = tcp
             }
 
-            await channel.send(.response(action: .updateUsage(
-                input: .init(totalTokenCount: promptTokens.count, cachedTokenCount: 0),
-                output: .init(
-                    totalTokenCount: generatedTokenCount,
-                    reasoningTokenCount: reasoningTokenCount
-                )
-            )))
+            await channel.send(
+                .response(
+                    action: .updateUsage(
+                        input: .init(totalTokenCount: promptTokens.count, cachedTokenCount: 0),
+                        output: .init(
+                            totalTokenCount: generatedTokenCount,
+                            reasoningTokenCount: reasoningTokenCount
+                        )
+                    )))
 
             // Yield to let the engine's tokenSequence Task finish cleanup
             // (putBackEngine, state reset, etc.) before the next respond().
@@ -523,7 +525,7 @@ public struct CoreAILanguageModel: LanguageModel {
             let strategy = ConstrainedDecodingStrategy(jsonSchema: jsonSchema, vocabSize: vocabSize)
             let stopSequences = StopSequences(for: tokenizer)
 
-            let stream = strategy.decode(
+            let stream = try await strategy.decode(
                 from: .tokens(promptTokens),
                 tokenizer: tokenizer,
                 inferenceEngine: engine,
